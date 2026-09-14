@@ -293,6 +293,23 @@
     gap:8px;
     flex-wrap:wrap;
   }
+  .dir-publish-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+    background:#EEF2F6;
+    border:1px solid #D8DEE3;
+    padding:12px;
+    margin-bottom:16px;
+  }
+  .dir-publish-row input[type=password]{
+    width:auto;
+    flex:0 1 220px;
+  }
+  .dir-publish-row .save-status{
+    margin-top:0;
+  }
   .dir-head h2{
     font-family:var(--sans);
     font-size:20px;
@@ -569,13 +586,18 @@ Tzaneen</textarea>
       <div class="dir-head">
         <div>
           <h2>Team Directory</h2>
-          <div class="dir-note">Loaded from <code>contacts.json</code> next to this page. Admins: add or edit contacts below, then <strong>Download contacts.json</strong> and commit that file to the repo so everyone else's copy updates. Nothing here writes back to GitHub automatically.</div>
+          <div class="dir-note">Loaded from <code>contacts.json</code>. Admins: add or edit contacts below, enter the admin passcode, then click <strong>Publish Changes</strong> to update it live for everyone. "Download contacts.json" remains available as a manual backup/fallback.</div>
         </div>
         <div class="dir-head-actions">
           <button class="btn secondary" id="dirReloadBtn" style="width:auto;margin-top:0;" title="Re-fetches contacts.json and discards any unsaved changes made in this session">Reload from File</button>
           <button class="btn secondary" id="dirExportBtn" style="width:auto;margin-top:0;">Download contacts.json</button>
           <button class="btn" id="dirNewBtn" style="width:auto;margin-top:0;">+ New Contact</button>
         </div>
+      </div>
+      <div class="dir-publish-row">
+        <input type="password" id="dirPasscode" placeholder="Admin passcode" autocomplete="off">
+        <button class="btn" id="dirPublishBtn" style="width:auto;margin-top:0;">Publish Changes</button>
+        <span class="save-status" id="dirPublishStatus"></span>
       </div>
       <div id="dirList" class="dir-list">
         <div class="dir-empty">Loading directory…</div>
@@ -1352,6 +1374,58 @@ document.getElementById('dirExportBtn').addEventListener('click', ()=>{
   link.click();
   URL.revokeObjectURL(url);
 });
+
+// Publishes the current merged directory list live via the Cloudflare Pages
+// Function at /api/save-contacts, which holds the GitHub write token
+// server-side. On success, the just-published list becomes the new
+// baseline and session overrides are cleared (they're no longer "pending" —
+// they're in the file now).
+async function publishDirectory(){
+  const btn = document.getElementById('dirPublishBtn');
+  const passcodeInput = document.getElementById('dirPasscode');
+  const statusEl = document.getElementById('dirPublishStatus');
+  const passcode = passcodeInput.value;
+
+  const setPublishStatus = (msg, kind) => {
+    statusEl.textContent = msg || '';
+    statusEl.className = 'save-status' + (kind ? ' '+kind : '');
+  };
+
+  if(!passcode){
+    setPublishStatus('Enter the admin passcode first.', 'err');
+    return;
+  }
+
+  const entries = getDirectoryEntries();
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Publishing…';
+  setPublishStatus('');
+
+  try{
+    const res = await fetch('/api/save-contacts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Passcode': passcode },
+      body: JSON.stringify(entries)
+    });
+    let data = {};
+    try{ data = await res.json(); } catch(e){ /* non-JSON error response */ }
+    if(!res.ok) throw new Error(data.error || ('Request failed (HTTP '+res.status+')'));
+
+    baseEntries = entries;
+    localOverrides = {};
+    localDeletes = new Set();
+    renderDirectoryList(getDirectoryEntries());
+    setPublishStatus('Published — contacts.json is now live for everyone.', 'ok');
+  } catch(err){
+    console.error('Publish failed', err);
+    setPublishStatus("Couldn't publish: " + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+document.getElementById('dirPublishBtn').addEventListener('click', publishDirectory);
 
 /* ---------------- quick QR rendering ---------------- */
 const qrCanvas = document.getElementById('qrCanvas');
