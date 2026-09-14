@@ -572,7 +572,7 @@ Tzaneen</textarea>
           <div class="dir-note">Loaded from <code>contacts.json</code> next to this page. Admins: add or edit contacts below, then <strong>Download contacts.json</strong> and commit that file to the repo so everyone else's copy updates. Nothing here writes back to GitHub automatically.</div>
         </div>
         <div class="dir-head-actions">
-          <button class="btn secondary" id="dirReloadBtn" style="width:auto;margin-top:0;">Reload from File</button>
+          <button class="btn secondary" id="dirReloadBtn" style="width:auto;margin-top:0;" title="Re-fetches contacts.json and discards any unsaved changes made in this session">Reload from File</button>
           <button class="btn secondary" id="dirExportBtn" style="width:auto;margin-top:0;">Download contacts.json</button>
           <button class="btn" id="dirNewBtn" style="width:auto;margin-top:0;">+ New Contact</button>
         </div>
@@ -604,7 +604,7 @@ tabBtns.forEach(btn=>{
     if(btn.dataset.tab==='card'){ renderCard(); }
     if(btn.dataset.tab==='signature'){ renderSignature(); }
     if(btn.dataset.tab==='directory' && !directoryLoadedOnce){ loadDirectory(); }
-    if(btn.dataset.tab==='directory' && directoryLoadedOnce){ renderDirectoryList(directoryEntries); }
+    if(btn.dataset.tab==='directory' && directoryLoadedOnce){ renderDirectoryList(getDirectoryEntries()); }
   });
 });
 
@@ -1101,13 +1101,31 @@ document.getElementById('downloadVcfBtn').addEventListener('click', ()=>{
    is no write-back to GitHub from the browser — that would require a
    credential exposed to anyone viewing the page source, which we avoid. */
 const DIRECTORY_URL = './contacts.json';
-let directoryEntries = [];
+// Directory state is split so local session edits always merge cleanly with
+// whatever's in contacts.json, no matter which happens first:
+//   baseEntries      - the last-fetched contents of contacts.json
+//   localOverrides   - {id: data} for contacts added/edited this session
+//   localDeletes     - ids removed this session
+// getDirectoryEntries() below computes the actual merged, displayed list.
+let baseEntries = [];
+let localOverrides = {};
+let localDeletes = new Set();
 let directoryLoadedOnce = false;
 let currentCardId = null;   // null = creating a new entry
 let pendingDeleteId = null; // tracks the "confirm delete" step
 
 function slugify(str){
   return (str||'').toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'contact';
+}
+
+// Merges baseEntries (from contacts.json) with this session's local
+// overrides/deletes into the list that's actually displayed/exported.
+function getDirectoryEntries(){
+  const map = new Map();
+  baseEntries.forEach(e => { if(e && e.id) map.set(e.id, e); });
+  Object.values(localOverrides).forEach(e => map.set(e.id, e));
+  localDeletes.forEach(id => map.delete(id));
+  return Array.from(map.values());
 }
 
 function collectFormData(){
@@ -1162,7 +1180,7 @@ document.getElementById('newContactBtn').addEventListener('click', ()=>{
   setSaveStatus('');
 });
 
-// Adds/updates the current form's contact in the in-memory directoryEntries
+// Adds/updates the current form's contact as a session-local override
 // array. This is instant and local — nothing is sent over the network.
 // Admins still need to click "Download contacts.json" and commit the file
 // for the change to actually reach anyone else.
@@ -1176,13 +1194,13 @@ function saveCurrentCard(){
   data.id = id;
   data.updatedAt = Date.now();
 
-  const idx = directoryEntries.findIndex(e=>e.id===id);
-  if(idx >= 0) directoryEntries[idx] = data; else directoryEntries.push(data);
+  localOverrides[id] = data;
+  localDeletes.delete(id);
 
   currentCardId = id;
   updateEditingNotice();
   setSaveStatus('Added to this session\'s list. Download contacts.json and commit it so everyone sees the update.', 'ok');
-  if(directoryLoadedOnce) renderDirectoryList(directoryEntries);
+  renderDirectoryList(getDirectoryEntries());
 }
 document.getElementById('saveDirectoryBtn').addEventListener('click', saveCurrentCard);
 
@@ -1257,9 +1275,10 @@ function renderDirectoryList(entries){
         return;
       }
       pendingDeleteId = null;
-      directoryEntries = directoryEntries.filter(e=>e.id !== entry.id);
+      delete localOverrides[entry.id];
+      localDeletes.add(entry.id);
       if(currentCardId === entry.id){ currentCardId = null; updateEditingNotice(); }
-      renderDirectoryList(directoryEntries);
+      renderDirectoryList(getDirectoryEntries());
       setSaveStatus('Removed from this session\'s list. Download contacts.json and commit it to publish the change.', 'ok');
     });
 
@@ -1274,24 +1293,41 @@ function renderDirectoryList(entries){
 
 // Fetches contacts.json from alongside this page. A 404 just means the file
 // doesn't exist yet (fresh repo) — that's a normal empty state, not an error.
-async function loadDirectory(){
+// By default this NEVER overwrites contacts the user has already added or
+// edited this session — pass force=true (used by the "Reload from File"
+// button) to explicitly discard session edits and reload from the file.
+async function loadDirectory(force){
   const list = document.getElementById('dirList');
-  list.innerHTML = '<div class="dir-empty">Loading directory…</div>';
+  if(!directoryLoadedOnce){ list.innerHTML = '<div class="dir-empty">Loading directory…</div>'; }
   try{
     const res = await fetch(DIRECTORY_URL, { cache:'no-store' });
+    let fetched = [];
     if(res.status === 404){
-      directoryEntries = [];
+      fetched = [];
     } else if(!res.ok){
       throw new Error('HTTP '+res.status);
     } else {
       const data = await res.json();
-      directoryEntries = Array.isArray(data) ? data : [];
+      fetched = Array.isArray(data) ? data : [];
+    }
+    // give any base entries that are missing an id a stable one, so the merge logic always has something to key on
+    fetched = fetched.map(e => (e && e.id) ? e : Object.assign({}, e, { id: slugify((e&&e.name||'')+'-'+(e&&e.surname||''))+'-'+Math.random().toString(36).slice(2,8) }));
+
+    baseEntries = fetched;
+    if(force){
+      // explicit reload: discard this session's unsaved additions/edits/deletes
+      localOverrides = {};
+      localDeletes = new Set();
     }
     directoryLoadedOnce = true;
-    renderDirectoryList(directoryEntries);
+    renderDirectoryList(getDirectoryEntries());
   } catch(err){
     console.error('Directory load failed', err);
-    list.innerHTML = '<div class="dir-empty">Couldn\'t load contacts.json — check your connection, or that the file exists at the site root, and try again.</div>';
+    if(!directoryLoadedOnce){
+      list.innerHTML = '<div class="dir-empty">Couldn\'t load contacts.json — check your connection, or that the file exists at the site root, and try again.</div>';
+    } else {
+      setSaveStatus("Couldn't reload contacts.json — check your connection and try again.", 'err');
+    }
   }
 }
 
@@ -1303,11 +1339,11 @@ document.getElementById('dirNewBtn').addEventListener('click', ()=>{
 });
 
 document.getElementById('dirReloadBtn').addEventListener('click', ()=>{
-  loadDirectory();
+  loadDirectory(true); // explicit reload always discards any unsaved session edits
 });
 
 document.getElementById('dirExportBtn').addEventListener('click', ()=>{
-  const json = JSON.stringify(directoryEntries, null, 2);
+  const json = JSON.stringify(getDirectoryEntries(), null, 2);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
