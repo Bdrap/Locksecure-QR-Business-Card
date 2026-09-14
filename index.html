@@ -288,6 +288,11 @@
     margin-bottom:20px;
     flex-wrap:wrap;
   }
+  .dir-head-actions{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
   .dir-head h2{
     font-family:var(--sans);
     font-size:20px;
@@ -335,6 +340,9 @@
     display:flex;
     gap:8px;
     flex:none;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+    max-width:280px;
   }
   .dir-btn{
     font-family:var(--body);
@@ -444,7 +452,7 @@
             Editing an existing directory entry. <button type="button" class="link-btn" id="newContactBtn">Start a new contact instead</button>
           </div>
 
-          <button class="btn" id="saveDirectoryBtn">Save to Team Directory</button>
+          <button class="btn" id="saveDirectoryBtn">Add to This Session</button>
           <div class="save-status" id="saveStatus"></div>
 
           <button class="btn secondary" id="downloadCardBtn">Download Card (PNG)</button>
@@ -561,9 +569,13 @@ Tzaneen</textarea>
       <div class="dir-head">
         <div>
           <h2>Team Directory</h2>
-          <div class="dir-note">Saved cards live in this app's shared storage — visible to anyone using this app, not just you.</div>
+          <div class="dir-note">Loaded from <code>contacts.json</code> next to this page. Admins: add or edit contacts below, then <strong>Download contacts.json</strong> and commit that file to the repo so everyone else's copy updates. Nothing here writes back to GitHub automatically.</div>
         </div>
-        <button class="btn" id="dirNewBtn" style="width:auto;margin-top:0;">+ New Contact</button>
+        <div class="dir-head-actions">
+          <button class="btn secondary" id="dirReloadBtn" style="width:auto;margin-top:0;">Reload from File</button>
+          <button class="btn secondary" id="dirExportBtn" style="width:auto;margin-top:0;">Download contacts.json</button>
+          <button class="btn" id="dirNewBtn" style="width:auto;margin-top:0;">+ New Contact</button>
+        </div>
       </div>
       <div id="dirList" class="dir-list">
         <div class="dir-empty">Loading directory…</div>
@@ -591,7 +603,8 @@ tabBtns.forEach(btn=>{
     if(btn.dataset.tab==='qr'){ renderQuickQR(); }
     if(btn.dataset.tab==='card'){ renderCard(); }
     if(btn.dataset.tab==='signature'){ renderSignature(); }
-    if(btn.dataset.tab==='directory'){ loadDirectory(); }
+    if(btn.dataset.tab==='directory' && !directoryLoadedOnce){ loadDirectory(); }
+    if(btn.dataset.tab==='directory' && directoryLoadedOnce){ renderDirectoryList(directoryEntries); }
   });
 });
 
@@ -630,32 +643,28 @@ const ctx = cardCanvas.getContext('2d');
 const W = cardCanvas.width, H = cardCanvas.height;
 
 // offscreen canvas for QR (QRious draws to its own canvas)
-const qrOffscreen = document.createElement('canvas');
-let qrious; // instance
+// (per-render QR canvases are created locally in drawCardToContext, so no shared offscreen canvas is needed here)
 
-function buildVCard(){
-  const title = document.getElementById('f-title').value.trim();
-  const name = document.getElementById('f-name').value.trim();
-  const surname = document.getElementById('f-surname').value.trim();
-  const phone = document.getElementById('f-phone').value.trim();
-  const email = document.getElementById('f-email').value.trim();
-  const company = document.getElementById('f-company').value.trim();
-  const website = document.getElementById('f-website').value.trim();
-  const address = document.getElementById('f-address').value.trim();
-
+function buildVCardFromData(data){
+  const { title, name, surname, phone, phone2, email, company, website, address } = data;
   let lines = ['BEGIN:VCARD','VERSION:3.0'];
-  lines.push(`N:${surname};${name};;;`);
-  lines.push(`FN:${name} ${surname}`.trim());
+  lines.push(`N:${surname||''};${name||''};;;`);
+  lines.push(`FN:${(name||'')+' '+(surname||'')}`.trim());
   if(title) lines.push(`TITLE:${title}`);
   if(company) lines.push(`ORG:${company}`);
   if(phone) lines.push(`TEL;TYPE=WORK,VOICE:${phone}`);
-  const phone2 = (document.getElementById('f-phone2')||{}).value;
-  if(phone2 && phone2.trim()) lines.push(`TEL;TYPE=WORK,VOICE:${phone2.trim()}`);
+  if(phone2) lines.push(`TEL;TYPE=WORK,VOICE:${phone2}`);
   if(email) lines.push(`EMAIL:${email}`);
   if(website) lines.push(`URL:${website.match(/^https?:\/\//)? website : 'https://'+website}`);
   if(address) lines.push(`ADR;TYPE=WORK:;;${address.replace(/,/g,'\\,')};;;;`);
   lines.push('END:VCARD');
   return lines.join('\n');
+}
+
+function buildVCard(){
+  const data = collectFormData();
+  data.phone2 = (document.getElementById('f-phone2')||{}).value?.trim() || '';
+  return buildVCardFromData(data);
 }
 
 function roundRectPath(c, x, y, w, h, r){
@@ -710,37 +719,36 @@ function drawPinIcon(c,cx,cy,color,holeColor){
 }
 const ICONS = { phone:drawPhoneIcon, mail:drawMailIcon, globe:drawGlobeIcon, pin:drawPinIcon };
 
-function renderCard(){
-  const theme = themes[activeTheme];
-  const title = document.getElementById('f-title').value.trim() || 'Title';
-  const name = document.getElementById('f-name').value.trim() || 'Name';
-  const surname = document.getElementById('f-surname').value.trim() || 'Surname';
-  const phone = document.getElementById('f-phone').value.trim();
-  const email = document.getElementById('f-email').value.trim();
-  const company = (document.getElementById('f-company').value.trim() || 'COMPANY').toUpperCase();
-  const website = document.getElementById('f-website').value.trim();
-  const address = document.getElementById('f-address').value.trim();
+function drawCardToContext(targetCtx, data, theme){
+  const title = data.title || 'Title';
+  const name = data.name || 'Name';
+  const surname = data.surname || 'Surname';
+  const phone = data.phone || '';
+  const email = data.email || '';
+  const company = (data.company || 'COMPANY').toUpperCase();
+  const website = data.website || '';
+  const address = data.address || '';
 
-  ctx.clearRect(0,0,W,H);
+  targetCtx.clearRect(0,0,W,H);
 
   const r = 14;
   const pad = 64;
-  roundRectPath(ctx,0,0,W,H,r);
-  ctx.save();
-  ctx.clip();
+  roundRectPath(targetCtx,0,0,W,H,r);
+  targetCtx.save();
+  targetCtx.clip();
 
   // background
-  ctx.fillStyle = theme.bg;
-  ctx.fillRect(0,0,W,H);
+  targetCtx.fillStyle = theme.bg;
+  targetCtx.fillRect(0,0,W,H);
 
   // name + title, top-left
-  ctx.fillStyle = theme.text;
-  ctx.textBaseline = 'alphabetic';
-  ctx.font = "700 46px 'Inter', sans-serif";
-  ctx.fillText(`${name} ${surname}`.toUpperCase(), pad, 108);
+  targetCtx.fillStyle = theme.text;
+  targetCtx.textBaseline = 'alphabetic';
+  targetCtx.font = "700 46px 'Inter', sans-serif";
+  targetCtx.fillText(`${name} ${surname}`.toUpperCase(), pad, 108);
 
-  ctx.font = "600 23px 'Inter', sans-serif";
-  ctx.fillText(title, pad, 144);
+  targetCtx.font = "600 23px 'Inter', sans-serif";
+  targetCtx.fillText(title, pad, 144);
 
   // contact rows: phone / email / website / address (skips any that are empty)
   const rows = [];
@@ -750,17 +758,17 @@ function renderCard(){
   if(address) rows.push({ icon:'pin', text: address });
 
   const rowStartY = 200, rowGap = 44, iconR = 16;
-  ctx.font = "500 21px 'Inter', sans-serif";
+  targetCtx.font = "500 21px 'Inter', sans-serif";
   rows.forEach((row,i)=>{
     const cy = rowStartY + i*rowGap;
-    ctx.fillStyle = theme.iconBg;
-    ctx.beginPath(); ctx.arc(pad+iconR, cy, iconR, 0, Math.PI*2); ctx.fill();
-    ICONS[row.icon](ctx, pad+iconR, cy, theme.iconFg, theme.iconBg);
-    ctx.fillStyle = theme.sub;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(row.text, pad + iconR*2 + 18, cy+1);
+    targetCtx.fillStyle = theme.iconBg;
+    targetCtx.beginPath(); targetCtx.arc(pad+iconR, cy, iconR, 0, Math.PI*2); targetCtx.fill();
+    ICONS[row.icon](targetCtx, pad+iconR, cy, theme.iconFg, theme.iconBg);
+    targetCtx.fillStyle = theme.sub;
+    targetCtx.textBaseline = 'middle';
+    targetCtx.fillText(row.text, pad + iconR*2 + 18, cy+1);
   });
-  ctx.textBaseline = 'alphabetic';
+  targetCtx.textBaseline = 'alphabetic';
 
   // logo + tagline, below the contact rows
   const logoTop = rowStartY + rows.length*rowGap + 30;
@@ -769,58 +777,73 @@ function renderCard(){
     const logoMaxW = 260, logoMaxH = 52;
     const scale = Math.min(logoMaxW/logoImg.naturalWidth, logoMaxH/logoImg.naturalHeight);
     const lw = logoImg.naturalWidth*scale, lh = logoImg.naturalHeight*scale;
-    ctx.drawImage(logoImg, pad, logoTop, lw, lh);
+    targetCtx.drawImage(logoImg, pad, logoTop, lw, lh);
     tagBaseline = logoTop + lh + 24;
   } else {
-    ctx.fillStyle = theme.text;
-    ctx.font = "700 34px 'Barlow Condensed', sans-serif";
-    ctx.fillText(company, pad, logoTop+34);
+    targetCtx.fillStyle = theme.text;
+    targetCtx.font = "700 34px 'Barlow Condensed', sans-serif";
+    targetCtx.fillText(company, pad, logoTop+34);
     tagBaseline = logoTop + 60;
   }
-  ctx.fillStyle = theme.accent;
-  ctx.font = "600 16px 'Inter', sans-serif";
-  ctx.save();
+  targetCtx.fillStyle = theme.accent;
+  targetCtx.font = "600 16px 'Inter', sans-serif";
+  targetCtx.save();
   // slight letter-spacing for the tagline, matching the signature's tracked lowercase style
   const tagline = 'ultimate tamper evident control';
   let tx = pad;
-  for(const ch of tagline){ ctx.fillText(ch, tx, tagBaseline); tx += ctx.measureText(ch).width + 1.4; }
-  ctx.restore();
+  for(const ch of tagline){ targetCtx.fillText(ch, tx, tagBaseline); tx += targetCtx.measureText(ch).width + 1.4; }
+  targetCtx.restore();
 
   // QR block, bottom-right
   const qrSize = 132;
   const qrX = W - pad - qrSize + 16;
   const qrY = H - pad - qrSize + 4;
 
-  const vcard = buildVCard();
-  qrOffscreen.width = qrSize*3;
-  qrOffscreen.height = qrSize*3;
-  new QRious({ element: qrOffscreen, value: vcard, size: qrSize*3, background: theme.qrBg, foreground: theme.qrFg, padding: 16 });
+  const vcard = buildVCardFromData(data);
+  const qrTemp = document.createElement('canvas');
+  qrTemp.width = qrSize*3;
+  qrTemp.height = qrSize*3;
+  new QRious({ element: qrTemp, value: vcard, size: qrSize*3, background: theme.qrBg, foreground: theme.qrFg, padding: 16 });
 
-  ctx.fillStyle = theme.qrBg;
-  roundRectPath(ctx, qrX-10, qrY-10, qrSize+20, qrSize+20, 8);
-  ctx.fill();
-  ctx.strokeStyle = theme.border;
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.drawImage(qrOffscreen, qrX, qrY, qrSize, qrSize);
+  targetCtx.fillStyle = theme.qrBg;
+  roundRectPath(targetCtx, qrX-10, qrY-10, qrSize+20, qrSize+20, 8);
+  targetCtx.fill();
+  targetCtx.strokeStyle = theme.border;
+  targetCtx.lineWidth = 1.5;
+  targetCtx.stroke();
+  targetCtx.drawImage(qrTemp, qrX, qrY, qrSize, qrSize);
 
-  ctx.fillStyle = theme.sub;
-  ctx.font = "600 12.5px 'Inter', sans-serif";
-  ctx.textAlign = 'center';
-  ctx.fillText('SCAN TO SAVE CONTACT', qrX+qrSize/2, qrY-20);
-  ctx.textAlign = 'left';
+  targetCtx.fillStyle = theme.sub;
+  targetCtx.font = "600 12.5px 'Inter', sans-serif";
+  targetCtx.textAlign = 'center';
+  targetCtx.fillText('SCAN TO SAVE CONTACT', qrX+qrSize/2, qrY-20);
+  targetCtx.textAlign = 'left';
 
   // thin footer rule, echoing the signature's bottom border
-  ctx.fillStyle = theme.rule;
-  ctx.fillRect(0, H-6, W, 6);
+  targetCtx.fillStyle = theme.rule;
+  targetCtx.fillRect(0, H-6, W, 6);
 
-  ctx.restore(); // clip
+  targetCtx.restore(); // clip
 
   // outer border
-  roundRectPath(ctx,0.75,0.75,W-1.5,H-1.5,r);
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = theme.border;
-  ctx.stroke();
+  roundRectPath(targetCtx,0.75,0.75,W-1.5,H-1.5,r);
+  targetCtx.lineWidth = 1.5;
+  targetCtx.strokeStyle = theme.border;
+  targetCtx.stroke();
+}
+
+function renderCard(){
+  const data = collectFormData();
+  drawCardToContext(ctx, data, themes[activeTheme]);
+}
+
+// renders any saved directory entry to a standalone PNG data URL without touching the live form/canvas
+function cardDataToPNG(data){
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = W; tempCanvas.height = H;
+  const tempCtx = tempCanvas.getContext('2d');
+  drawCardToContext(tempCtx, data, themes[typeof data.theme==='number' ? data.theme : 0]);
+  return tempCanvas.toDataURL('image/png');
 }
 
 /* ---------------- signature map graphic (stylised, not surveyed) ---------------- */
@@ -1070,8 +1093,16 @@ document.getElementById('downloadVcfBtn').addEventListener('click', ()=>{
   URL.revokeObjectURL(url);
 });
 
-/* ---------------- team directory (persisted via window.storage, shared) ---------------- */
-const DIR_PREFIX = 'card_';
+/* ---------------- team directory ----------------
+   Read-only shared data comes from contacts.json in this repo (fetched at
+   load time). Admins edit the list right here in the app, then use
+   "Download contacts.json" and commit that file back to the repo so
+   everyone else's copy of the page picks up the change on next load. There
+   is no write-back to GitHub from the browser — that would require a
+   credential exposed to anyone viewing the page source, which we avoid. */
+const DIRECTORY_URL = './contacts.json';
+let directoryEntries = [];
+let directoryLoadedOnce = false;
 let currentCardId = null;   // null = creating a new entry
 let pendingDeleteId = null; // tracks the "confirm delete" step
 
@@ -1118,10 +1149,10 @@ function updateEditingNotice(){
   const saveBtn = document.getElementById('saveDirectoryBtn');
   if(currentCardId){
     notice.style.display = 'block';
-    saveBtn.textContent = 'Update Directory Entry';
+    saveBtn.textContent = 'Update in This Session';
   } else {
     notice.style.display = 'none';
-    saveBtn.textContent = 'Save to Team Directory';
+    saveBtn.textContent = 'Add to This Session';
   }
 }
 
@@ -1131,33 +1162,27 @@ document.getElementById('newContactBtn').addEventListener('click', ()=>{
   setSaveStatus('');
 });
 
-async function saveCurrentCard(){
-  const btn = document.getElementById('saveDirectoryBtn');
+// Adds/updates the current form's contact in the in-memory directoryEntries
+// array. This is instant and local — nothing is sent over the network.
+// Admins still need to click "Download contacts.json" and commit the file
+// for the change to actually reach anyone else.
+function saveCurrentCard(){
   const data = collectFormData();
   if(!data.name && !data.surname){
     setSaveStatus('Add at least a name before saving.', 'err');
     return;
   }
-  btn.disabled = true;
-  const originalLabel = btn.textContent;
-  btn.textContent = 'Saving…';
-  try{
-    const id = currentCardId || (DIR_PREFIX + slugify(data.name+'-'+data.surname) + '-' + Date.now().toString(36));
-    data.id = id;
-    data.updatedAt = Date.now();
-    const result = await window.storage.set(id, JSON.stringify(data), true);
-    if(!result) throw new Error('Storage did not confirm the save');
-    currentCardId = id;
-    updateEditingNotice();
-    setSaveStatus('Saved to the shared directory just now.', 'ok');
-  } catch(err){
-    console.error('Save failed', err);
-    setSaveStatus("Couldn't save — check your connection and try again.", 'err');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = originalLabel === 'Saving…' ? (currentCardId ? 'Update Directory Entry' : 'Save to Team Directory') : btn.textContent;
-    updateEditingNotice();
-  }
+  const id = currentCardId || (slugify(data.name+'-'+data.surname) + '-' + Date.now().toString(36));
+  data.id = id;
+  data.updatedAt = Date.now();
+
+  const idx = directoryEntries.findIndex(e=>e.id===id);
+  if(idx >= 0) directoryEntries[idx] = data; else directoryEntries.push(data);
+
+  currentCardId = id;
+  updateEditingNotice();
+  setSaveStatus('Added to this session\'s list. Download contacts.json and commit it so everyone sees the update.', 'ok');
+  if(directoryLoadedOnce) renderDirectoryList(directoryEntries);
 }
 document.getElementById('saveDirectoryBtn').addEventListener('click', saveCurrentCard);
 
@@ -1170,12 +1195,12 @@ function fmtDate(ts){
 function renderDirectoryList(entries){
   const list = document.getElementById('dirList');
   if(!entries.length){
-    list.innerHTML = '<div class="dir-empty">No contacts saved yet. Design a card, then use "Save to Team Directory".</div>';
+    list.innerHTML = '<div class="dir-empty">No contacts in contacts.json yet. Design a card, then use "Add to This Session", then "Download contacts.json" to create the file.</div>';
     return;
   }
-  entries.sort((a,b)=> (a.name+a.surname).localeCompare(b.name+b.surname));
+  const sorted = entries.slice().sort((a,b)=> (a.name+a.surname).localeCompare(b.name+b.surname));
   list.innerHTML = '';
-  entries.forEach(entry=>{
+  sorted.forEach(entry=>{
     const row = document.createElement('div');
     row.className = 'dir-row';
 
@@ -1193,6 +1218,16 @@ function renderDirectoryList(entries){
     const actions = document.createElement('div');
     actions.className = 'dir-row-actions';
 
+    const cardBtn = document.createElement('button');
+    cardBtn.className = 'dir-btn';
+    cardBtn.textContent = 'Download Card';
+    cardBtn.addEventListener('click', ()=>{
+      const link = document.createElement('a');
+      link.download = `business-card-${entry.name}-${entry.surname}`.replace(/\s+/g,'-').toLowerCase() + '.png';
+      link.href = cardDataToPNG(entry);
+      link.click();
+    });
+
     const editBtn = document.createElement('button');
     editBtn.className = 'dir-btn';
     editBtn.textContent = 'Edit';
@@ -1207,7 +1242,7 @@ function renderDirectoryList(entries){
     const delBtn = document.createElement('button');
     delBtn.className = 'dir-btn danger';
     delBtn.textContent = 'Delete';
-    delBtn.addEventListener('click', async ()=>{
+    delBtn.addEventListener('click', ()=>{
       if(pendingDeleteId !== entry.id){
         pendingDeleteId = entry.id;
         delBtn.textContent = 'Confirm delete';
@@ -1222,20 +1257,13 @@ function renderDirectoryList(entries){
         return;
       }
       pendingDeleteId = null;
-      delBtn.disabled = true;
-      delBtn.textContent = 'Deleting…';
-      try{
-        await window.storage.delete(entry.id, true);
-        if(currentCardId === entry.id){ currentCardId = null; updateEditingNotice(); }
-        loadDirectory();
-      } catch(err){
-        console.error('Delete failed', err);
-        delBtn.disabled = false;
-        delBtn.textContent = 'Delete';
-        delBtn.classList.remove('confirm');
-      }
+      directoryEntries = directoryEntries.filter(e=>e.id !== entry.id);
+      if(currentCardId === entry.id){ currentCardId = null; updateEditingNotice(); }
+      renderDirectoryList(directoryEntries);
+      setSaveStatus('Removed from this session\'s list. Download contacts.json and commit it to publish the change.', 'ok');
     });
 
+    actions.appendChild(cardBtn);
     actions.appendChild(editBtn);
     actions.appendChild(delBtn);
     row.appendChild(main);
@@ -1244,31 +1272,49 @@ function renderDirectoryList(entries){
   });
 }
 
+// Fetches contacts.json from alongside this page. A 404 just means the file
+// doesn't exist yet (fresh repo) — that's a normal empty state, not an error.
 async function loadDirectory(){
   const list = document.getElementById('dirList');
   list.innerHTML = '<div class="dir-empty">Loading directory…</div>';
   try{
-    const res = await window.storage.list(DIR_PREFIX, true);
-    const keys = (res && res.keys) || [];
-    if(!keys.length){ renderDirectoryList([]); return; }
-    const entries = [];
-    for(const key of keys){
-      try{
-        const r = await window.storage.get(key, true);
-        if(r && r.value) entries.push(JSON.parse(r.value));
-      } catch(e){ /* skip entries that fail to load */ }
+    const res = await fetch(DIRECTORY_URL, { cache:'no-store' });
+    if(res.status === 404){
+      directoryEntries = [];
+    } else if(!res.ok){
+      throw new Error('HTTP '+res.status);
+    } else {
+      const data = await res.json();
+      directoryEntries = Array.isArray(data) ? data : [];
     }
-    renderDirectoryList(entries);
+    directoryLoadedOnce = true;
+    renderDirectoryList(directoryEntries);
   } catch(err){
     console.error('Directory load failed', err);
-    list.innerHTML = '<div class="dir-empty">Couldn\'t load the directory — check your connection and try again.</div>';
+    list.innerHTML = '<div class="dir-empty">Couldn\'t load contacts.json — check your connection, or that the file exists at the site root, and try again.</div>';
   }
 }
+
 document.getElementById('dirNewBtn').addEventListener('click', ()=>{
   currentCardId = null;
   updateEditingNotice();
   setSaveStatus('');
   document.querySelector('.tab-btn[data-tab="card"]').click();
+});
+
+document.getElementById('dirReloadBtn').addEventListener('click', ()=>{
+  loadDirectory();
+});
+
+document.getElementById('dirExportBtn').addEventListener('click', ()=>{
+  const json = JSON.stringify(directoryEntries, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.download = 'contacts.json';
+  link.href = url;
+  link.click();
+  URL.revokeObjectURL(url);
 });
 
 /* ---------------- quick QR rendering ---------------- */

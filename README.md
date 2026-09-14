@@ -2,7 +2,7 @@
 
 A single-file, no-build web app for designing business cards and email
 signatures in Locksecure's corporate style, generating QR codes (including
-scannable vCard QR codes on each card), and maintaining a shared team
+scannable vCard QR codes on each card), and browsing a shared team
 directory of saved contacts.
 
 Everything lives in **`index.html`** — no npm packages, no bundler, no
@@ -21,8 +21,9 @@ server-side code. Open the file in a browser, or host it as a static page.
   regardless of how much text is entered.
 - **QR code generator** — standalone tab for turning any text/URL into a
   downloadable QR code (via [QRious](https://github.com/neocotic/qrious)).
-- **Team Directory** — save, edit, and delete contact cards for a team. See
-  **Important caveat** below before relying on this outside Claude.ai.
+- **Team Directory** — browse saved contacts and download each one's
+  business card PNG directly from the list. See **How the directory works**
+  below.
 
 ## Running it
 
@@ -45,40 +46,82 @@ Since it's a single static file with no build step, any static host works:
   because the file is named `index.html`.
 - **Netlify / Vercel / Cloudflare Pages** — drag-and-drop the file or connect
   the repo.
-- **Your own server** — upload `index.html` anywhere a web server can serve
-  static files.
+- **Your own server** — upload `index.html` (and `contacts.json`) anywhere a
+  web server can serve static files.
 
-## ⚠️ Important caveat: the Team Directory tab
+## How the directory works
 
-The **Team Directory** feature (save/list/edit/delete contacts) is built on
-`window.storage`, a key-value storage API that Claude.ai injects into
-artifacts it renders. **It is not a standard browser API.**
+The Team Directory is intentionally **read-mostly with an admin-controlled
+write path**, so nobody has to run a server or expose a database
+credential in the browser.
 
-- Inside a Claude.ai artifact, it works and persists data in Claude's own
-  shared storage for that artifact.
-- Hosted anywhere else (GitHub Pages, your own server, etc.), `window.storage`
-  is `undefined`. The tab will still render, but Save/Load/Delete will fail
-  with an on-screen error (the code catches the exception rather than
-  crashing the page) — no data will actually persist.
+- On load, the app fetches **`contacts.json`** from right next to
+  `index.html` and displays it. Anyone who opens the hosted page sees
+  whatever is currently committed to that file — no login needed to view.
+- There is **no live write-back to GitHub from the browser.** Editing or
+  adding a contact in the app only updates an in-memory list for that
+  browser session — it does not touch the file in the repo.
 
-The **Business Card**, **Email Signature**, and **Quick QR Code** tabs do
-not depend on this API and work identically everywhere.
+### If you're the admin maintaining the list
 
-### If you want the directory to work once hosted outside Claude.ai
+1. Open the hosted app (or `index.html` locally).
+2. Go to **Team Directory** → **Reload from File** to make sure you're
+   starting from the latest committed version.
+3. Use **+ New Contact** / **Edit** / **Delete** as normal — these all just
+   change your local in-session copy of the list.
+4. When you're happy with it, click **Download contacts.json**.
+5. Replace the `contacts.json` file in the repo with the one you just
+   downloaded, and commit + push (or use GitHub's web UI to upload/replace
+   the file directly — no special settings needed, just open the file in
+   the repo and use the edit/upload button).
+6. Anyone who reloads the hosted page now sees the update.
 
-You'll need to swap the storage backend for something real. Two
-straightforward options:
+This deliberately avoids putting any GitHub credential in the page's
+JavaScript — a token capable of writing to the repo would be visible to
+anyone who opens dev tools, which is a much bigger risk than it looks. Since
+only 1–2 people need to maintain this list, having them push the updated
+JSON file directly is the simplest safe option.
 
-1. **`localStorage`** — simplest change, but data is private to each
-   visitor's own browser and device, not shared across a team.
-2. **A real backend** (Firebase, Supabase, or a small REST API) — actual
-   shared, persistent storage across everyone who uses the hosted page, at
-   the cost of setting up an account/API key and updating the `saveCurrentCard`,
-   `loadDirectory`, and delete logic in `index.html` to call it instead of
-   `window.storage`.
+### Supplying QR codes / cards to individual people
 
-Happy to help implement either of these if you want the directory feature to
-work on the hosted version.
+From the **Team Directory** list, each row has a **Download Card** button
+that renders that person's business card (with their scannable QR code
+baked in) straight to a PNG — no need to load them into the form first.
+The intended flow is: admin downloads the card, then sends it to that
+person directly (email, Slack, printed handout, etc.) — the app doesn't
+need to do that distribution part itself.
+
+### `contacts.json` shape
+
+```json
+[
+  {
+    "id": "unique-id",
+    "title": "Job Title",
+    "name": "First",
+    "surname": "Last",
+    "phone": "+27 ...",
+    "email": "person@locksecure.co.za",
+    "company": "LOCKSECURE",
+    "website": "www.locksecure.co.za",
+    "address": "Optional office address",
+    "theme": 0,
+    "updatedAt": 1700000000000
+  }
+]
+```
+
+`theme` is the index into the app's 3 built-in themes (0 = Signature White,
+1 = Navy Card, 2 = Ivory Bronze). `updatedAt` is a millisecond timestamp,
+just used for display ("updated 3 Sep 2026").
+
+### If you want live shared editing instead
+
+If down the line you want *anyone* using the hosted page to be able to hit
+Save and have it stick for everyone (not just 1–2 admins editing and
+pushing a file), you'd need a real backend — Firebase or Supabase are the
+lightest-weight options — since that requires a write credential that can't
+safely live in client-side JavaScript the way this JSON-file approach does.
 
 ## License
 
